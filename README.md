@@ -13,9 +13,37 @@ swipes stay in your session only; see [Multi-user deployment](#multi-user-deploy
   <img src="assets/labels_vs_accuracy.png" width="640" alt="Active learning vs. random sampling accuracy curve">
 </p>
 
-Active learning (green) tracks above random sampling (gray) for most of a real
-198-label swiping session — the uncertainty-sampling loop is picking up signal
-faster than chance, not just going in order.
+Active learning (green) tracks above random sampling (gray) most clearly
+through the first ~50 labels of a real 198-label swiping session, holding a
+lead of roughly 10-15 accuracy points — the uncertainty-sampling loop is
+picking up signal faster than chance early on, not just going in order. After
+that the two curves interleave and largely converge for the rest of the
+session, as both models level off around the same accuracy once there's
+enough data either way.
+
+### Model performance over time
+
+Lift over the majority-class baseline actually *shrank* as the dataset grew —
++20pts at 35 labels, down to +7.7pts at 196. That's not a regression; it's
+what happens when more data pushes the Keep/Remove split closer to 50/50,
+which raises the baseline's own accuracy and makes it a harder target to
+beat. The absolute model accuracy stayed in a similar range throughout (74% →
+66%); what changed was how impressive that number looks next to an
+increasingly competitive baseline. Reporting the honest number here rather
+than the flashier early one.
+
+A simpler model tells an interesting side story here too: run head-to-head on
+the same 198 labels with identical k-fold splits, a plain logistic regression
+actually edges out the RandomForest used in the live app — 68.6% vs 63.6%
+accuracy, both against a 58.6% majority-class baseline. The two models also
+disagree on what matters most: logistic regression's strongest signal is
+`play_recency_days` and `playlist_count`, while the RandomForest leans
+hardest on `days_since_added` and `release_year`. That's not a case for
+switching — RandomForest stays the model driving the live active-learning
+loop, feature importance chart, and taste summary above, kept for its
+non-linear splits and its role in that interpretability story — but it's a
+genuine finding about how model choice changes which signal gets surfaced
+from the same data.
 
 ### What the model learned about my taste
 
@@ -37,6 +65,15 @@ The strongest signal by far is how recently a track was added, followed by
 release year and how many other tracks I've saved from the same artist —
 `insights.py` and [`data/taste_summary.md`](data/taste_summary.md) turn that
 into the plain-English summary above.
+
+### Built against a live, changing API
+
+Spotify deprecated or restructured several endpoints mid-project —
+`audio-features` and artist genre lookups were removed for apps without
+Extended Quota approval, `playlist_items` responses were restructured, and
+`/users/{id}/playlists` was fully retired for playlist creation as of March
+2026. Each one broke something real; each fix is documented in the commit
+history rather than silently patched over.
 
 ---
 
@@ -62,6 +99,9 @@ genre data are **not** used anywhere in this project — all three require Spoti
 endpoints (`audio-features`, `artists`) that 403 for apps without Extended Quota
 Mode approval, which personal/hobby apps don't get. All signal instead comes from
 track metadata and your own behavior (recently played, playlists, saves).
+
+<details>
+<summary><strong>Full setup instructions</strong> (Spotify credentials, local dev, deployment)</summary>
 
 ## Setup
 
@@ -252,3 +292,5 @@ database) — not implemented here.
 6. Make sure your (and any testers') Spotify accounts are added under the
    dashboard's **User Management** tab (Setup step 7 above) — Development Mode
    apps only allow allowlisted accounts to authenticate, deployed or not.
+
+</details>
