@@ -27,6 +27,9 @@ LEARNING_CURVE_CSV_PATH = DATA_DIR / "learning_curve.csv"
 COMPARISON_CHART_PATH = DATA_DIR / "labels_vs_accuracy.png"
 FEATURE_IMPORTANCE_CHART_PATH = DATA_DIR / "feature_importance.png"
 TASTE_SUMMARY_PATH = DATA_DIR / "taste_summary.md"
+REMOVAL_ACTION_CHART_PATH = DATA_DIR / "removal_action_breakdown.png"
+KEEP_RATE_BY_COLLECTION_CHART_PATH = DATA_DIR / "keep_rate_by_collection.png"
+SWIPE_ACTIVITY_CHART_PATH = DATA_DIR / "swipe_activity_over_time.png"
 
 RANDOM_TRIALS = 20
 MIN_LABELS_FOR_CONFIDENCE = 100
@@ -270,6 +273,103 @@ def generate_taste_summary(labels_df: pd.DataFrame, sorted_names: list, sorted_i
     print(f"Saved taste summary to {TASTE_SUMMARY_PATH}")
 
 
+def plot_removal_action_breakdown(labels_df: pd.DataFrame):
+    """Bar chart of how many Removes were unsave-from-library vs
+    remove-from-playlist vs remove-from-playlist-and-library vs the
+    album fallback. Skips gracefully if no rows have this data yet
+    (it was added after some labels were already collected)."""
+    if "removal_action" not in labels_df.columns:
+        print("No removal_action data yet (older labels predate this column) — skipping removal-action chart.")
+        return
+
+    counts = labels_df["removal_action"].dropna().value_counts()
+    if counts.empty:
+        print("No removal_action data yet (older labels predate this column) — skipping removal-action chart.")
+        return
+
+    print("=" * 60)
+    print("REMOVAL ACTION BREAKDOWN")
+    print("=" * 60)
+    for action, count in counts.items():
+        print(f"  {action:<30s} {count}")
+    print()
+
+    plt.figure(figsize=(8, 5))
+    plt.bar(counts.index.astype(str), counts.values, color="#1DB954")
+    plt.ylabel("Count")
+    plt.title("Removal Action Breakdown")
+    plt.xticks(rotation=20, ha="right")
+    plt.tight_layout()
+    plt.savefig(REMOVAL_ACTION_CHART_PATH, dpi=150)
+    plt.close()
+    print(f"Saved removal action breakdown chart to {REMOVAL_ACTION_CHART_PATH}")
+
+
+def plot_keep_rate_by_collection_type(labels_df: pd.DataFrame):
+    """Bar chart of % kept per collection_type (liked/playlist/album). Skips
+    gracefully if no rows have this data yet."""
+    if "collection_type" not in labels_df.columns:
+        print("No collection_type data yet (older labels predate this column) — skipping keep-rate-by-collection chart.")
+        return
+
+    subset = labels_df.dropna(subset=["collection_type"])
+    if subset.empty:
+        print("No collection_type data yet (older labels predate this column) — skipping keep-rate-by-collection chart.")
+        return
+
+    keep_rate = subset.groupby("collection_type")["label"].mean() * 100
+    counts = subset.groupby("collection_type")["label"].count()
+
+    print("=" * 60)
+    print("KEEP RATE BY COLLECTION TYPE")
+    print("=" * 60)
+    for ctype, pct in keep_rate.items():
+        print(f"  {ctype:<12s} {pct:5.1f}% kept  (n={counts[ctype]})")
+    print()
+
+    plt.figure(figsize=(7, 5))
+    plt.bar(keep_rate.index.astype(str), keep_rate.values, color="#1DB954")
+    plt.ylabel("% Kept")
+    plt.ylim(0, 100)
+    plt.title("Keep Rate by Collection Type")
+    plt.tight_layout()
+    plt.savefig(KEEP_RATE_BY_COLLECTION_CHART_PATH, dpi=150)
+    plt.close()
+    print(f"Saved keep-rate-by-collection chart to {KEEP_RATE_BY_COLLECTION_CHART_PATH}")
+
+
+def plot_swipe_activity_over_time(labels_df: pd.DataFrame):
+    """Line chart of swipes per day. Skips gracefully if swiped_at is missing
+    or entirely null (older labels predate this column)."""
+    if "swiped_at" not in labels_df.columns:
+        print("No swiped_at data yet (older labels predate this column) — skipping swipe-activity chart.")
+        return
+
+    timestamps = pd.to_datetime(labels_df["swiped_at"], errors="coerce").dropna()
+    if timestamps.empty:
+        print("No swiped_at data yet (older labels predate this column) — skipping swipe-activity chart.")
+        return
+
+    daily_counts = timestamps.dt.date.value_counts().sort_index()
+
+    print("=" * 60)
+    print("SWIPE ACTIVITY OVER TIME")
+    print("=" * 60)
+    for day, count in daily_counts.items():
+        print(f"  {day}: {count} swipes")
+    print()
+
+    plt.figure(figsize=(9, 5))
+    plt.plot(daily_counts.index.astype(str), daily_counts.values, marker="o", color="#1DB954")
+    plt.ylabel("Swipes")
+    plt.title("Swipe Activity Over Time")
+    plt.xticks(rotation=30, ha="right")
+    plt.tight_layout()
+    plt.savefig(SWIPE_ACTIVITY_CHART_PATH, dpi=150)
+    plt.close()
+    print(f"Saved swipe activity chart to {SWIPE_ACTIVITY_CHART_PATH}")
+
+
 def main():
     if not LABELS_CSV_PATH.exists():
         print("data/labels.csv not found — swipe some tracks with `streamlit run app.py` first.")
@@ -317,6 +417,13 @@ def main():
     print("=" * 60)
 
     generate_taste_summary(labels_df, sorted_names, sorted_importances)
+
+    print()
+    plot_removal_action_breakdown(labels_df)
+    print()
+    plot_keep_rate_by_collection_type(labels_df)
+    print()
+    plot_swipe_activity_over_time(labels_df)
 
 
 if __name__ == "__main__":

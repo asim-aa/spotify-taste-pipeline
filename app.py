@@ -28,6 +28,7 @@ Remove is a live action against Spotify, and what it does depends on context:
 """
 
 import os
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,10 @@ TRACKS_CSV_PATH = DATA_DIR / "tracks.csv"
 LABELS_CSV_PATH = DATA_DIR / "labels.csv"
 LEARNING_CURVE_CSV_PATH = DATA_DIR / "learning_curve.csv"
 
+# Added for removal-action/collection-context charting. Older labels.csv rows
+# predate these — load_labels() backfills them as None rather than crashing.
+NEW_LABEL_COLUMNS = ["collection_type", "removal_action", "swiped_at"]
+
 # Spotify user ID of the app owner (you) — the only visitor whose data persists
 # to disk. Set via the OWNER_SPOTIFY_ID env var (add it to .env locally, and to
 # your Streamlit Cloud app's secrets when deployed) rather than hardcoding it
@@ -86,8 +91,12 @@ def load_tracks() -> pd.DataFrame:
 
 def load_labels(tracks_columns: list) -> pd.DataFrame:
     if LABELS_CSV_PATH.exists():
-        return pd.read_csv(LABELS_CSV_PATH)
-    return pd.DataFrame(columns=tracks_columns + ["label"])
+        df = pd.read_csv(LABELS_CSV_PATH)
+        for col in NEW_LABEL_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        return df
+    return pd.DataFrame(columns=tracks_columns + ["label"] + NEW_LABEL_COLUMNS)
 
 
 def compute_fill_values(tracks_df: pd.DataFrame) -> dict:
@@ -143,6 +152,19 @@ def pick_next_track(tracks_df, labeled_ids, fills, model=None):
 
 
 def append_csv_row(path, row_df: pd.DataFrame):
+    """Append one row, self-healing if the file's existing header doesn't match
+    row_df's columns (e.g. new columns added since the file was last written) —
+    rewrites the whole file once with the unioned schema (old rows get NaN for
+    new columns) instead of corrupting it with a header/data column mismatch.
+    """
+    if path.exists():
+        existing_header = pd.read_csv(path, nrows=0).columns.tolist()
+        if list(row_df.columns) != existing_header:
+            existing_df = pd.read_csv(path)
+            combined = pd.concat([existing_df, row_df], ignore_index=True)
+            combined.to_csv(path, index=False)
+            return
+
     write_header = not path.exists()
     row_df.to_csv(path, mode="a", header=write_header, index=False)
 
@@ -271,7 +293,14 @@ def render_gallery():
 
 def handle_remove_action(sp, collection: dict, track_id: str):
     """Dispatch Remove based on the selected collection's type. Always a real
-    API call against whichever Spotify account is logged in — owner or tester."""
+    API call against whichever Spotify account is logged in — owner or tester.
+
+    Returns which action was taken (for removal_action logging): one of
+    "unsaved_library", "removed_playlist", "removed_playlist_and_library",
+    "album_fallback_unsave", or None if no action was taken at all (the
+    non-owned-playlist guard below — shouldn't happen since the gallery only
+    ever lists owned playlists, but nothing is attempted if it does).
+    """
     if collection["type"] == "liked":
         if unsave_track(sp, track_id):
             st.toast("Removed from your library", icon="✅")
@@ -281,7 +310,7 @@ def handle_remove_action(sp, collection: dict, track_id: str):
                 "still recorded). If this keeps happening, delete "
                 ".spotify_token_cache and restart the app to re-authorize."
             )
-        return
+        return "unsaved_library"
 
     if collection["type"] == "album":
         if unsave_track(sp, track_id):
@@ -289,12 +318,12 @@ def handle_remove_action(sp, collection: dict, track_id: str):
         else:
             st.warning("Couldn't unsave this track (label was still recorded).")
         st.caption("Removed from your saved tracks — a single track can't be removed from a saved album.")
-        return
+        return "album_fallback_unsave"
 
     # playlist
     if not collection.get("is_owned"):
         st.warning("Remove is disabled for this playlist — you don't own it, so its contents can't be modified.")
-        return
+        return None
 
     mode = st.session_state.get("remove_mode", "playlist")
 
@@ -308,6 +337,9 @@ def handle_remove_action(sp, collection: dict, track_id: str):
             st.toast("Also unsaved from your library", icon="✅")
         else:
             st.warning("Couldn't also unsave this track from your library (label was still recorded).")
+        return "removed_playlist_and_library"
+
+    return "removed_playlist"
 
 
 def render_swipe_session():
@@ -383,8 +415,16 @@ def render_swipe_session():
 
     if keep_clicked or remove_clicked:
         label = 1 if keep_clicked else 0
+
+        removal_action = None
+        if remove_clicked:
+            removal_action = handle_remove_action(sp, collection, current_id)
+
         row = track.to_dict()
         row["label"] = label
+        row["collection_type"] = collection["type"]
+        row["removal_action"] = removal_action
+        row["swiped_at"] = datetime.now().isoformat()
         row_df = pd.DataFrame([row])
 
         st.session_state.labels_df = pd.concat(
@@ -392,9 +432,6 @@ def render_swipe_session():
         )
         if is_owner:
             append_csv_row(LABELS_CSV_PATH, row_df)
-
-        if remove_clicked:
-            handle_remove_action(sp, collection, current_id)
 
         updated_labels_df = st.session_state.labels_df
         feats = prepare_features(updated_labels_df, fills)
@@ -430,7 +467,9 @@ def main():
                 playlists = fetch_playlists_with_tracks(sp, use_disk_cache=False)
                 tracks_df, _dropped = build_dataframe(raw_tracks, recently_played, playlists)
             st.session_state.tracks_df = tracks_df
-            st.session_state.labels_df = pd.DataFrame(columns=list(tracks_df.columns) + ["label"])
+            st.session_state.labels_df = pd.DataFrame(
+                columns=list(tracks_df.columns) + ["label"] + NEW_LABEL_COLUMNS
+            )
 
         st.session_state.fills = compute_fill_values(st.session_state.tracks_df)
         st.session_state.current_track_id = None
