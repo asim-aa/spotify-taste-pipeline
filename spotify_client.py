@@ -21,13 +21,19 @@ DATA_DIR = BASE_DIR / "data"
 RAW_TRACKS_PATH = DATA_DIR / "raw_tracks.json"
 RAW_RECENTLY_PLAYED_PATH = DATA_DIR / "raw_recently_played.json"
 RAW_PLAYLISTS_PATH = DATA_DIR / "raw_playlists.json"
+RAW_ALBUMS_PATH = DATA_DIR / "raw_albums.json"
 TOKEN_CACHE_PATH = BASE_DIR / ".spotify_token_cache"
 
-SCOPES = "user-library-read user-library-modify user-read-recently-played user-top-read playlist-read-private playlist-read-collaborative"
+SCOPES = (
+    "user-library-read user-library-modify user-read-recently-played user-top-read "
+    "playlist-read-private playlist-read-collaborative "
+    "playlist-modify-public playlist-modify-private"
+)
 
 SAVED_TRACKS_PAGE_SIZE = 50
 PLAYLISTS_PAGE_SIZE = 50
 PLAYLIST_ITEMS_PAGE_SIZE = 100
+SAVED_ALBUMS_PAGE_SIZE = 50
 
 
 def get_spotify_client() -> spotipy.Spotify:
@@ -162,12 +168,15 @@ def _fetch_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> list:
 def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
     """Fetch all of the user's playlists and the track IDs each contains.
 
-    Returns a list of {"id", "name", "track_ids"} dicts. Cached to disk.
+    Returns a list of {"id", "name", "image_url", "is_owned", "track_ids"} dicts.
+    Cached to disk.
     """
     if not force_refresh and RAW_PLAYLISTS_PATH.exists():
         print(f"Loading playlists from cache ({RAW_PLAYLISTS_PATH})...")
         with open(RAW_PLAYLISTS_PATH) as f:
             return json.load(f)
+
+    current_user_id = _call_with_retry(sp.current_user).get("id")
 
     print("Fetching playlists from Spotify API...")
     playlists = []
@@ -195,12 +204,95 @@ def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False
                 track_ids = []
             else:
                 raise
-        output.append({"id": pl["id"], "name": pl.get("name"), "track_ids": track_ids})
+        images = pl.get("images") or []
+        output.append(
+            {
+                "id": pl["id"],
+                "name": pl.get("name"),
+                "image_url": images[0]["url"] if images else None,
+                "is_owned": (pl.get("owner") or {}).get("id") == current_user_id,
+                "track_ids": track_ids,
+            }
+        )
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(RAW_PLAYLISTS_PATH, "w") as f:
         json.dump(output, f)
     return output
+
+
+def fetch_saved_albums(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
+    """Fetch all of the user's saved albums, paginating 50 at a time. Cached to disk.
+
+    Returns a list of {"id", "name", "artist_name", "image_url", "track_count",
+    "track_ids"} dicts. Album track IDs come from the nested tracks.items in the
+    saved-album response; very large albums beyond that single page won't have
+    every track ID captured, but that's a rare edge case for personal libraries.
+    """
+    if not force_refresh and RAW_ALBUMS_PATH.exists():
+        print(f"Loading saved albums from cache ({RAW_ALBUMS_PATH})...")
+        with open(RAW_ALBUMS_PATH) as f:
+            return json.load(f)
+
+    print("Fetching saved albums from Spotify API...")
+    items = []
+    offset = 0
+    while True:
+        results = _call_with_retry(
+            sp.current_user_saved_albums, limit=SAVED_ALBUMS_PAGE_SIZE, offset=offset
+        )
+        batch = results.get("items", [])
+        if not batch:
+            break
+        items.extend(batch)
+        print(f"  fetched {len(items)} albums so far...")
+        if len(batch) < SAVED_ALBUMS_PAGE_SIZE:
+            break
+        offset += SAVED_ALBUMS_PAGE_SIZE
+
+    output = []
+    for entry in items:
+        album = entry.get("album") or {}
+        track_items = ((album.get("tracks") or {}).get("items")) or []
+        track_ids = [t["id"] for t in track_items if t and t.get("id")]
+        images = album.get("images") or []
+        output.append(
+            {
+                "id": album.get("id"),
+                "name": album.get("name"),
+                "artist_name": ", ".join(a["name"] for a in album.get("artists", [])),
+                "image_url": images[0]["url"] if images else None,
+                "track_count": album.get("total_tracks") or len(track_ids),
+                "track_ids": track_ids,
+            }
+        )
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(RAW_ALBUMS_PATH, "w") as f:
+        json.dump(output, f)
+    return output
+
+
+def remove_track_from_playlist(sp: spotipy.Spotify, playlist_id: str, track_id: str) -> bool:
+    """Remove all occurrences of a track from a playlist (requires playlist-modify-*).
+
+    Never raises — returns True on success, False (with a printed warning) on
+    failure, same pattern as unsave_track.
+    """
+    try:
+        _call_with_retry(sp.playlist_remove_all_occurrences_of_items, playlist_id, [track_id])
+        return True
+    except SpotifyException as e:
+        if e.http_status == 403:
+            print(
+                f"WARNING: failed to remove track {track_id} from playlist {playlist_id} "
+                "(403 Forbidden). This usually means the app's OAuth token doesn't have "
+                "the playlist-modify-public/private scope yet, or you don't own this "
+                "playlist — delete .spotify_token_cache and restart to re-authorize."
+            )
+        else:
+            print(f"WARNING: failed to remove track {track_id} from playlist {playlist_id}: {e}")
+        return False
 
 
 def unsave_track(sp: spotipy.Spotify, track_id: str) -> bool:
