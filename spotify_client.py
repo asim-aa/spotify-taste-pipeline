@@ -13,6 +13,7 @@ from pathlib import Path
 
 import spotipy
 from dotenv import load_dotenv
+from spotipy.cache_handler import CacheHandler
 from spotipy.exceptions import SpotifyException
 from spotipy.oauth2 import SpotifyOAuth
 
@@ -36,8 +37,27 @@ PLAYLIST_ITEMS_PAGE_SIZE = 100
 SAVED_ALBUMS_PAGE_SIZE = 50
 
 
-def get_spotify_client() -> spotipy.Spotify:
-    """Build an authenticated Spotify client using the Authorization Code flow."""
+class StreamlitSessionCacheHandler(CacheHandler):
+    """Keeps the OAuth token in one visitor's Streamlit session only.
+
+    Never touches disk, so concurrent users on a shared deployment each get
+    their own token that lives only as long as their browser session — never
+    written to a shared file, never visible to another visitor.
+    """
+
+    TOKEN_KEY = "spotify_token_info"
+
+    def __init__(self, session_state):
+        self.session_state = session_state
+
+    def get_cached_token(self):
+        return self.session_state.get(self.TOKEN_KEY)
+
+    def save_token_to_cache(self, token_info):
+        self.session_state[self.TOKEN_KEY] = token_info
+
+
+def _load_credentials() -> tuple:
     load_dotenv()
 
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
@@ -58,15 +78,46 @@ def get_spotify_client() -> spotipy.Spotify:
             f"Missing required env var(s): {', '.join(missing)}. "
             "Copy .env.example to .env and fill in your Spotify app credentials."
         )
+    return client_id, client_secret, redirect_uri
 
-    auth_manager = SpotifyOAuth(
+
+def build_auth_manager(session_state=None) -> SpotifyOAuth:
+    """Build a SpotifyOAuth manager.
+
+    With `session_state` (a Streamlit multi-user deployment), the OAuth token
+    is cached only in that visitor's own session via StreamlitSessionCacheHandler
+    — never on disk, so nothing about auth is shared between concurrent users.
+    Without it (local CLI usage — features.py, evaluate.py's data-only path),
+    falls back to the original shared on-disk token cache at TOKEN_CACHE_PATH.
+    """
+    client_id, client_secret, redirect_uri = _load_credentials()
+
+    if session_state is not None:
+        return SpotifyOAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            scope=SCOPES,
+            cache_handler=StreamlitSessionCacheHandler(session_state),
+            show_dialog=False,
+            open_browser=False,
+        )
+
+    return SpotifyOAuth(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         scope=SCOPES,
         cache_path=str(TOKEN_CACHE_PATH),
     )
-    return spotipy.Spotify(auth_manager=auth_manager)
+
+
+def get_spotify_client(session_state=None) -> spotipy.Spotify:
+    """Build an authenticated Spotify client using the Authorization Code flow.
+
+    See build_auth_manager for what `session_state` changes about token storage.
+    """
+    return spotipy.Spotify(auth_manager=build_auth_manager(session_state))
 
 
 def _call_with_retry(func, *args, max_retries=5, **kwargs):
@@ -89,9 +140,13 @@ def _call_with_retry(func, *args, max_retries=5, **kwargs):
     raise RuntimeError(f"Exceeded max retries ({max_retries}) due to rate limiting")
 
 
-def fetch_saved_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
-    """Fetch all of the user's saved tracks, paginating 50 at a time. Cached to disk."""
-    if not force_refresh and RAW_TRACKS_PATH.exists():
+def fetch_saved_tracks(sp: spotipy.Spotify, force_refresh: bool = False, use_disk_cache: bool = True) -> list:
+    """Fetch all of the user's saved tracks, paginating 50 at a time.
+
+    Cached to disk unless use_disk_cache=False (used for non-owner sessions in a
+    multi-user deployment, where nothing should be written to shared server disk).
+    """
+    if use_disk_cache and not force_refresh and RAW_TRACKS_PATH.exists():
         print(f"Loading saved tracks from cache ({RAW_TRACKS_PATH})...")
         with open(RAW_TRACKS_PATH) as f:
             return json.load(f)
@@ -112,15 +167,21 @@ def fetch_saved_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list
             break
         offset += SAVED_TRACKS_PAGE_SIZE
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(RAW_TRACKS_PATH, "w") as f:
-        json.dump(items, f)
+    if use_disk_cache:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RAW_TRACKS_PATH, "w") as f:
+            json.dump(items, f)
     return items
 
 
-def fetch_recently_played(sp: spotipy.Spotify, limit: int = 50, force_refresh: bool = False) -> list:
-    """Fetch recently played tracks (Spotify only exposes the last ~50). Cached to disk."""
-    if not force_refresh and RAW_RECENTLY_PLAYED_PATH.exists():
+def fetch_recently_played(
+    sp: spotipy.Spotify, limit: int = 50, force_refresh: bool = False, use_disk_cache: bool = True
+) -> list:
+    """Fetch recently played tracks (Spotify only exposes the last ~50).
+
+    Cached to disk unless use_disk_cache=False (see fetch_saved_tracks).
+    """
+    if use_disk_cache and not force_refresh and RAW_RECENTLY_PLAYED_PATH.exists():
         print(f"Loading recently played from cache ({RAW_RECENTLY_PLAYED_PATH})...")
         with open(RAW_RECENTLY_PLAYED_PATH) as f:
             return json.load(f)
@@ -129,9 +190,10 @@ def fetch_recently_played(sp: spotipy.Spotify, limit: int = 50, force_refresh: b
     results = _call_with_retry(sp.current_user_recently_played, limit=limit)
     items = results.get("items", [])
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(RAW_RECENTLY_PLAYED_PATH, "w") as f:
-        json.dump(items, f)
+    if use_disk_cache:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RAW_RECENTLY_PLAYED_PATH, "w") as f:
+            json.dump(items, f)
     return items
 
 
@@ -165,13 +227,15 @@ def _fetch_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> list:
     return track_ids
 
 
-def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
+def fetch_playlists_with_tracks(
+    sp: spotipy.Spotify, force_refresh: bool = False, use_disk_cache: bool = True
+) -> list:
     """Fetch all of the user's playlists and the track IDs each contains.
 
     Returns a list of {"id", "name", "image_url", "is_owned", "track_ids"} dicts.
-    Cached to disk.
+    Cached to disk unless use_disk_cache=False (see fetch_saved_tracks).
     """
-    if not force_refresh and RAW_PLAYLISTS_PATH.exists():
+    if use_disk_cache and not force_refresh and RAW_PLAYLISTS_PATH.exists():
         print(f"Loading playlists from cache ({RAW_PLAYLISTS_PATH})...")
         with open(RAW_PLAYLISTS_PATH) as f:
             return json.load(f)
@@ -215,21 +279,25 @@ def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False
             }
         )
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(RAW_PLAYLISTS_PATH, "w") as f:
-        json.dump(output, f)
+    if use_disk_cache:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RAW_PLAYLISTS_PATH, "w") as f:
+            json.dump(output, f)
     return output
 
 
-def fetch_saved_albums(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
-    """Fetch all of the user's saved albums, paginating 50 at a time. Cached to disk.
+def fetch_saved_albums(
+    sp: spotipy.Spotify, force_refresh: bool = False, use_disk_cache: bool = True
+) -> list:
+    """Fetch all of the user's saved albums, paginating 50 at a time.
 
     Returns a list of {"id", "name", "artist_name", "image_url", "track_count",
     "track_ids"} dicts. Album track IDs come from the nested tracks.items in the
     saved-album response; very large albums beyond that single page won't have
     every track ID captured, but that's a rare edge case for personal libraries.
+    Cached to disk unless use_disk_cache=False (see fetch_saved_tracks).
     """
-    if not force_refresh and RAW_ALBUMS_PATH.exists():
+    if use_disk_cache and not force_refresh and RAW_ALBUMS_PATH.exists():
         print(f"Loading saved albums from cache ({RAW_ALBUMS_PATH})...")
         with open(RAW_ALBUMS_PATH) as f:
             return json.load(f)
@@ -267,9 +335,10 @@ def fetch_saved_albums(sp: spotipy.Spotify, force_refresh: bool = False) -> list
             }
         )
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(RAW_ALBUMS_PATH, "w") as f:
-        json.dump(output, f)
+    if use_disk_cache:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(RAW_ALBUMS_PATH, "w") as f:
+            json.dump(output, f)
     return output
 
 
