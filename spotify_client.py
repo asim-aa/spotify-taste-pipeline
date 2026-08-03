@@ -430,7 +430,12 @@ def find_or_create_playlist(sp: spotipy.Spotify, name: str, public: bool = False
         offset += PLAYLISTS_PAGE_SIZE
 
     print(f"Creating playlist '{name}'...")
-    playlist = _call_with_retry(sp.user_playlist_create, current_user_id, name, public=public)
+    # user_playlist_create() posts to the now-dead /users/{user_id}/playlists
+    # (403 for every caller after Spotify's Feb 2026 migration deadline).
+    # current_user_playlist_create() posts to /me/playlists instead and takes
+    # no user ID at all — the current, correct endpoint (confirmed against the
+    # installed spotipy 2.26.0 source, which already implements this).
+    playlist = _call_with_retry(sp.current_user_playlist_create, name, public=public)
     return playlist["id"]
 
 
