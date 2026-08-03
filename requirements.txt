@@ -1,3 +1,5 @@
 spotipy
 pandas
 python-dotenv
+streamlit
+scikit-learn

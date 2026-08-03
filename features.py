@@ -1,4 +1,13 @@
-"""Build a single clean tracks dataframe from cached/fetched Spotify data."""
+"""Build a single clean tracks dataframe from metadata + behavioral signals.
+
+No audio-features dependency (that endpoint 403s for apps created after Nov 2024),
+no preview_url usage (also unavailable to new apps), and no genre/artist lookup
+(the /v1/artists endpoint 403s the same way — both are gated behind Extended
+Quota Mode approval this app doesn't have). Signal comes from saved tracks,
+recently-played history, and playlist co-occurrence.
+"""
+
+from __future__ import annotations
 
 from datetime import datetime, timezone
 
@@ -6,7 +15,8 @@ import pandas as pd
 
 from spotify_client import (
     DATA_DIR,
-    fetch_audio_features,
+    fetch_playlists_with_tracks,
+    fetch_recently_played,
     fetch_saved_tracks,
     get_spotify_client,
 )
@@ -20,46 +30,81 @@ COLUMNS = [
     "album_name",
     "release_year",
     "popularity",
-    "danceability",
-    "energy",
-    "valence",
-    "tempo",
-    "acousticness",
-    "instrumentalness",
     "added_at",
     "days_since_added",
+    "play_recency_days",
+    "playlist_count",
+    "artist_track_count",
+    "image_url",
 ]
 
 
-def _valid_track_ids(raw_tracks: list) -> list:
-    """IDs of tracks that are actual Spotify tracks (not local files, not missing an id)."""
+def _valid_saved_items(raw_tracks: list) -> list:
+    """Saved-track entries that are actual Spotify tracks (not local files, have an id)."""
     return [
-        item["track"]["id"]
+        item
         for item in raw_tracks
         if item.get("track") and not item["track"].get("is_local") and item["track"].get("id")
     ]
 
 
-def build_dataframe(raw_tracks: list, audio_features: dict) -> tuple[pd.DataFrame, int]:
-    """Combine saved-track metadata with audio features into one dataframe.
+def _primary_artist_id(track: dict) -> str | None:
+    artists = track.get("artists") or []
+    return artists[0].get("id") if artists else None
 
-    Tracks with no usable ID (local files, podcasts) or missing audio features are
-    dropped rather than crashing; the drop count is returned alongside the dataframe.
+
+def _play_recency_map(recently_played: list) -> dict:
+    """track_id -> days since its most recent play in the recently-played history."""
+    now = datetime.now(timezone.utc)
+    recency = {}
+    for item in recently_played:
+        track = item.get("track")
+        played_at_raw = item.get("played_at")
+        if not track or not track.get("id") or not played_at_raw:
+            continue
+        played_at = datetime.fromisoformat(played_at_raw.replace("Z", "+00:00"))
+        days = (now - played_at).days
+        tid = track["id"]
+        if tid not in recency or days < recency[tid]:
+            recency[tid] = days
+    return recency
+
+
+def _playlist_count_map(playlists: list) -> dict:
+    """track_id -> number of the user's playlists containing it."""
+    counts = {}
+    for pl in playlists:
+        for tid in pl.get("track_ids", []):
+            counts[tid] = counts.get(tid, 0) + 1
+    return counts
+
+
+def build_dataframe(
+    raw_tracks: list, recently_played: list, playlists: list
+) -> tuple[pd.DataFrame, int]:
+    """Combine saved-track metadata with behavioral signals into one dataframe.
+
+    Tracks with no usable ID (local files, podcasts) are dropped rather than
+    crashing; the drop count is returned alongside the dataframe.
     """
+    valid_items = _valid_saved_items(raw_tracks)
+    dropped = len(raw_tracks) - len(valid_items)
+
+    play_recency = _play_recency_map(recently_played)
+    playlist_counts = _playlist_count_map(playlists)
+
+    artist_counts = {}
+    for item in valid_items:
+        aid = _primary_artist_id(item["track"])
+        artist_counts[aid] = artist_counts.get(aid, 0) + 1
+
     now = datetime.now(timezone.utc)
     rows = []
-    dropped = 0
 
-    for item in raw_tracks:
-        track = item.get("track")
-        if not track or track.get("is_local") or not track.get("id"):
-            dropped += 1
-            continue
-
-        features = audio_features.get(track["id"])
-        if not features:
-            dropped += 1
-            continue
+    for item in valid_items:
+        track = item["track"]
+        tid = track["id"]
+        aid = _primary_artist_id(track)
 
         added_at_raw = item.get("added_at")
         added_at = (
@@ -70,23 +115,23 @@ def build_dataframe(raw_tracks: list, audio_features: dict) -> tuple[pd.DataFram
         album = track.get("album") or {}
         release_date = album.get("release_date") or ""
         release_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+        images = album.get("images") or []
+        image_url = images[0]["url"] if images else None
 
         rows.append(
             {
-                "track_id": track["id"],
+                "track_id": tid,
                 "track_name": track.get("name"),
                 "artist_name": ", ".join(a["name"] for a in track.get("artists", [])),
                 "album_name": album.get("name"),
                 "release_year": release_year,
                 "popularity": track.get("popularity"),
-                "danceability": features.get("danceability"),
-                "energy": features.get("energy"),
-                "valence": features.get("valence"),
-                "tempo": features.get("tempo"),
-                "acousticness": features.get("acousticness"),
-                "instrumentalness": features.get("instrumentalness"),
                 "added_at": added_at.isoformat() if added_at else None,
                 "days_since_added": days_since_added,
+                "play_recency_days": play_recency.get(tid),
+                "playlist_count": playlist_counts.get(tid, 0),
+                "artist_track_count": artist_counts.get(aid, 1),
+                "image_url": image_url,
             }
         )
 
@@ -98,19 +143,19 @@ def run_pipeline(force_refresh: bool = False) -> pd.DataFrame:
     sp = get_spotify_client()
 
     raw_tracks = fetch_saved_tracks(sp, force_refresh=force_refresh)
-    track_ids = _valid_track_ids(raw_tracks)
-    audio_features = fetch_audio_features(sp, track_ids, force_refresh=force_refresh)
+    recently_played = fetch_recently_played(sp, force_refresh=force_refresh)
+    playlists = fetch_playlists_with_tracks(sp, force_refresh=force_refresh)
 
-    df, dropped = build_dataframe(raw_tracks, audio_features)
+    df, dropped = build_dataframe(raw_tracks, recently_played, playlists)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(TRACKS_CSV_PATH, index=False)
 
     print("=" * 50)
     print("Spotify pipeline summary")
-    print(f"  Total saved tracks pulled:            {len(raw_tracks)}")
-    print(f"  Tracks with complete audio features:  {len(df)}")
-    print(f"  Tracks dropped (local/no id/no feats): {dropped}")
+    print(f"  Total saved tracks pulled:               {len(raw_tracks)}")
+    print(f"  Tracks with complete metadata:            {len(df)}")
+    print(f"  Tracks dropped (local file / no track id): {dropped}")
     print(f"  Saved to: {TRACKS_CSV_PATH}")
     print("=" * 50)
 

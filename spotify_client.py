@@ -1,4 +1,10 @@
-"""Spotify API client: OAuth, paginated fetches, rate-limit handling, and local caching."""
+"""Spotify API client: OAuth, paginated fetches, rate-limit handling, and local caching.
+
+Only metadata/behavioral endpoints are used here (saved tracks, recently played,
+playlists). The audio-features and artists (genre) endpoints are not used — both
+403 for this app (Development Mode apps don't get access to those catalog
+endpoints without Extended Quota Mode approval).
+"""
 
 import json
 import os
@@ -13,14 +19,15 @@ from spotipy.oauth2 import SpotifyOAuth
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 RAW_TRACKS_PATH = DATA_DIR / "raw_tracks.json"
-RAW_AUDIO_FEATURES_PATH = DATA_DIR / "raw_audio_features.json"
 RAW_RECENTLY_PLAYED_PATH = DATA_DIR / "raw_recently_played.json"
+RAW_PLAYLISTS_PATH = DATA_DIR / "raw_playlists.json"
 TOKEN_CACHE_PATH = BASE_DIR / ".spotify_token_cache"
 
-SCOPES = "user-library-read user-read-recently-played user-top-read"
+SCOPES = "user-library-read user-read-recently-played user-top-read playlist-read-private playlist-read-collaborative"
 
 SAVED_TRACKS_PAGE_SIZE = 50
-AUDIO_FEATURES_BATCH_SIZE = 100
+PLAYLISTS_PAGE_SIZE = 50
+PLAYLIST_ITEMS_PAGE_SIZE = 100
 
 
 def get_spotify_client() -> spotipy.Spotify:
@@ -105,35 +112,6 @@ def fetch_saved_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list
     return items
 
 
-def fetch_audio_features(sp: spotipy.Spotify, track_ids: list, force_refresh: bool = False) -> dict:
-    """Fetch audio features for the given track IDs, batching 100 at a time.
-
-    Cached to disk as {track_id: features_or_None}; only missing IDs are fetched on rerun.
-    """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    cache = {}
-    if not force_refresh and RAW_AUDIO_FEATURES_PATH.exists():
-        with open(RAW_AUDIO_FEATURES_PATH) as f:
-            cache = json.load(f)
-
-    missing_ids = [tid for tid in track_ids if tid not in cache]
-    if missing_ids:
-        print(f"Fetching audio features for {len(missing_ids)} tracks...")
-        for i in range(0, len(missing_ids), AUDIO_FEATURES_BATCH_SIZE):
-            batch = missing_ids[i : i + AUDIO_FEATURES_BATCH_SIZE]
-            results = _call_with_retry(sp.audio_features, batch)
-            for tid, feat in zip(batch, results):
-                cache[tid] = feat
-            print(f"  fetched features for {min(i + AUDIO_FEATURES_BATCH_SIZE, len(missing_ids))}/{len(missing_ids)}...")
-        with open(RAW_AUDIO_FEATURES_PATH, "w") as f:
-            json.dump(cache, f)
-    else:
-        print("All requested audio features already cached.")
-
-    return {tid: cache[tid] for tid in track_ids if tid in cache}
-
-
 def fetch_recently_played(sp: spotipy.Spotify, limit: int = 50, force_refresh: bool = False) -> list:
     """Fetch recently played tracks (Spotify only exposes the last ~50). Cached to disk."""
     if not force_refresh and RAW_RECENTLY_PLAYED_PATH.exists():
@@ -149,3 +127,77 @@ def fetch_recently_played(sp: spotipy.Spotify, limit: int = 50, force_refresh: b
     with open(RAW_RECENTLY_PLAYED_PATH, "w") as f:
         json.dump(items, f)
     return items
+
+
+def _fetch_playlist_track_ids(sp: spotipy.Spotify, playlist_id: str) -> list:
+    """Paginate a single playlist's items (100 per call) and return its track IDs.
+
+    Each entry nests its content under "item" (not the older "track" key), with a
+    "type" field ("track" vs "episode") to distinguish tracks from podcast episodes.
+    """
+    track_ids = []
+    offset = 0
+    while True:
+        results = _call_with_retry(
+            sp.playlist_items,
+            playlist_id,
+            limit=PLAYLIST_ITEMS_PAGE_SIZE,
+            offset=offset,
+            fields="items(item(id,type)),total",
+            additional_types=["track"],
+        )
+        batch = results.get("items", [])
+        if not batch:
+            break
+        for entry in batch:
+            item = entry.get("item")
+            if item and item.get("type") == "track" and item.get("id"):
+                track_ids.append(item["id"])
+        if len(batch) < PLAYLIST_ITEMS_PAGE_SIZE:
+            break
+        offset += PLAYLIST_ITEMS_PAGE_SIZE
+    return track_ids
+
+
+def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False) -> list:
+    """Fetch all of the user's playlists and the track IDs each contains.
+
+    Returns a list of {"id", "name", "track_ids"} dicts. Cached to disk.
+    """
+    if not force_refresh and RAW_PLAYLISTS_PATH.exists():
+        print(f"Loading playlists from cache ({RAW_PLAYLISTS_PATH})...")
+        with open(RAW_PLAYLISTS_PATH) as f:
+            return json.load(f)
+
+    print("Fetching playlists from Spotify API...")
+    playlists = []
+    offset = 0
+    while True:
+        results = _call_with_retry(
+            sp.current_user_playlists, limit=PLAYLISTS_PAGE_SIZE, offset=offset
+        )
+        batch = results.get("items", [])
+        if not batch:
+            break
+        playlists.extend(batch)
+        if len(batch) < PLAYLISTS_PAGE_SIZE:
+            break
+        offset += PLAYLISTS_PAGE_SIZE
+
+    output = []
+    for pl in playlists:
+        print(f"  fetching tracks for playlist '{pl.get('name')}'...")
+        try:
+            track_ids = _fetch_playlist_track_ids(sp, pl["id"])
+        except SpotifyException as e:
+            if e.http_status == 403:
+                print(f"    Skipping playlist '{pl.get('name')}' — not owned/collaborative, contents unavailable")
+                track_ids = []
+            else:
+                raise
+        output.append({"id": pl["id"], "name": pl.get("name"), "track_ids": track_ids})
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(RAW_PLAYLISTS_PATH, "w") as f:
+        json.dump(output, f)
+    return output
