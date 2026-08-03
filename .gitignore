@@ -9,6 +9,15 @@ data/*.png
 data/*.md
 !data/.gitkeep
 
+# Exceptions: committed so the deployed Streamlit Cloud app boots with real
+# data instead of empty state (it can't run features.py or accumulate labels
+# durably itself — see README's "Deploying to Streamlit Cloud" section).
+# Re-commit these manually after local swiping/pipeline sessions to update them;
+# nothing auto-syncs disk writes back to git.
+!data/tracks.csv
+!data/labels.csv
+!data/learning_curve.csv
+
 # python
 __pycache__/
 *.pyc
