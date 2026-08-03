@@ -385,3 +385,19 @@ def unsave_track(sp: spotipy.Spotify, track_id: str) -> bool:
         else:
             print(f"WARNING: failed to unsave track {track_id} from your library: {e}")
         return False
+
+
+def fetch_top_tracks(sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 20) -> list:
+    """Fetch the user's top tracks for a given time range (short_term ~4 weeks,
+    medium_term ~6 months, long_term ~years). Single page (limit<=50, no
+    pagination needed), no disk caching — cheap enough to call fresh each time.
+    """
+    results = _call_with_retry(sp.current_user_top_tracks, time_range=time_range, limit=limit)
+    return results.get("items", [])
+
+
+def fetch_top_artists(sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 20) -> list:
+    """Fetch the user's top artists for a given time range. Same caching/pagination
+    notes as fetch_top_tracks."""
+    results = _call_with_retry(sp.current_user_top_artists, time_range=time_range, limit=limit)
+    return results.get("items", [])
