@@ -23,7 +23,7 @@ RAW_RECENTLY_PLAYED_PATH = DATA_DIR / "raw_recently_played.json"
 RAW_PLAYLISTS_PATH = DATA_DIR / "raw_playlists.json"
 TOKEN_CACHE_PATH = BASE_DIR / ".spotify_token_cache"
 
-SCOPES = "user-library-read user-read-recently-played user-top-read playlist-read-private playlist-read-collaborative"
+SCOPES = "user-library-read user-library-modify user-read-recently-played user-top-read playlist-read-private playlist-read-collaborative"
 
 SAVED_TRACKS_PAGE_SIZE = 50
 PLAYLISTS_PAGE_SIZE = 50
@@ -201,3 +201,26 @@ def fetch_playlists_with_tracks(sp: spotipy.Spotify, force_refresh: bool = False
     with open(RAW_PLAYLISTS_PATH, "w") as f:
         json.dump(output, f)
     return output
+
+
+def unsave_track(sp: spotipy.Spotify, track_id: str) -> bool:
+    """Remove a track from the user's Liked Songs library (requires user-library-modify).
+
+    Never raises — returns True on success, False (with a printed warning) on
+    failure, so a failed unsave doesn't crash the caller or block a label from
+    being recorded.
+    """
+    try:
+        _call_with_retry(sp.current_user_saved_tracks_delete, [track_id])
+        return True
+    except SpotifyException as e:
+        if e.http_status == 403:
+            print(
+                f"WARNING: failed to unsave track {track_id} (403 Forbidden). "
+                "This usually means the app's OAuth token doesn't have the "
+                "user-library-modify scope yet — delete .spotify_token_cache and "
+                "restart to re-authorize with the new permission."
+            )
+        else:
+            print(f"WARNING: failed to unsave track {track_id} from your library: {e}")
+        return False

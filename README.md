@@ -7,7 +7,8 @@ An ML portfolio project built on top of your own Spotify listening data.
   frequency) into one clean, cached `data/tracks.csv`.
 - **Phase 2** (`app.py`): a Streamlit swipe UI (Keep/Remove) that labels tracks into
   `data/labels.csv` and, after a short bootstrap, uses active learning (uncertainty
-  sampling with a RandomForestClassifier) to pick which track to show next.
+  sampling with a RandomForestClassifier) to pick which track to show next. Remove
+  is a live action — it also unsaves the track from your actual Spotify library.
 
 Not part of this repo yet: Phase 3 (model evaluation/learning-curve charts) and
 Phase 4 (a write-up of what the model learned).
@@ -66,8 +67,9 @@ python features.py
 ```
 
 On first run, a browser window will open asking you to log in to Spotify and
-authorize the app (scopes: `user-library-read`, `user-read-recently-played`,
-`user-top-read`, `playlist-read-private`, `playlist-read-collaborative`). After authorizing, you'll be redirected to
+authorize the app (scopes: `user-library-read`, `user-library-modify`,
+`user-read-recently-played`, `user-top-read`, `playlist-read-private`,
+`playlist-read-collaborative`). After authorizing, you'll be redirected to
 `http://127.0.0.1:8888/callback?code=...` — that page won't load (nothing is
 listening on that port yet), which is expected; spotipy reads the `code` from
 the URL and continues. Your auth token is then cached locally in
@@ -100,3 +102,10 @@ model, after which each swipe retrains a RandomForestClassifier on your labels s
 far and picks the next track it's most uncertain about. Labels are saved to
 `data/labels.csv`, and the accuracy of the model at each step is logged to
 `data/learning_curve.csv`.
+
+**Remove is a live action against your Spotify account.** Clicking Remove both
+logs the label locally *and* calls the Spotify API to unsave that track from your
+Liked Songs library immediately — it is not a dry run. If the app's cached OAuth
+token predates the `user-library-modify` scope, delete `.spotify_token_cache` and
+restart to re-authorize; a failed unsave shows a warning in the UI but the label
+is still recorded either way.

@@ -6,6 +6,9 @@ swipe retrains a RandomForestClassifier on data/labels.csv and the next track
 shown is whichever unlabeled track the model is most uncertain about (predicted
 P(keep) closest to 0.5). Every swipe's (num_labels, k-fold accuracy) is logged to
 data/learning_curve.csv for a later active-learning-vs-random comparison chart.
+
+Remove is a live action: in addition to logging the label, it calls the Spotify
+API to unsave the track from the user's Liked Songs library immediately.
 """
 
 import numpy as np
@@ -14,7 +17,7 @@ import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 
-from spotify_client import DATA_DIR
+from spotify_client import DATA_DIR, get_spotify_client, unsave_track
 
 TRACKS_CSV_PATH = DATA_DIR / "tracks.csv"
 LABELS_CSV_PATH = DATA_DIR / "labels.csv"
@@ -113,6 +116,7 @@ def main():
         st.session_state.fills = compute_fill_values(st.session_state.tracks_df)
         st.session_state.current_track_id = None
         st.session_state.last_accuracy = None
+        st.session_state.sp = get_spotify_client()
 
     tracks_df = st.session_state.tracks_df
     labels_df = st.session_state.labels_df
@@ -165,6 +169,16 @@ def main():
             [st.session_state.labels_df, row_df], ignore_index=True
         )
         append_csv_row(LABELS_CSV_PATH, row_df)
+
+        if remove_clicked:
+            if unsave_track(st.session_state.sp, current_id):
+                st.toast("Removed from your library", icon="✅")
+            else:
+                st.warning(
+                    "Couldn't unsave this track from your Spotify library (label was "
+                    "still recorded). If this keeps happening, delete "
+                    ".spotify_token_cache and restart the app to re-authorize."
+                )
 
         updated_labels_df = st.session_state.labels_df
         feats = prepare_features(updated_labels_df, fills)
