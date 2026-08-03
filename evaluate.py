@@ -11,6 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 
 from app import (
     FEATURE_COLUMNS,
@@ -26,6 +28,7 @@ LABELS_CSV_PATH = DATA_DIR / "labels.csv"
 LEARNING_CURVE_CSV_PATH = DATA_DIR / "learning_curve.csv"
 COMPARISON_CHART_PATH = DATA_DIR / "labels_vs_accuracy.png"
 FEATURE_IMPORTANCE_CHART_PATH = DATA_DIR / "feature_importance.png"
+MODEL_COMPARISON_CHART_PATH = DATA_DIR / "model_comparison.png"
 TASTE_SUMMARY_PATH = DATA_DIR / "taste_summary.md"
 REMOVAL_ACTION_CHART_PATH = DATA_DIR / "removal_action_breakdown.png"
 KEEP_RATE_BY_COLLECTION_CHART_PATH = DATA_DIR / "keep_rate_by_collection.png"
@@ -116,6 +119,141 @@ def evaluate_final_model(labels_df: pd.DataFrame, fills: dict):
     print()
 
     return model, accuracy, baseline
+
+
+# --- Logistic regression comparison (additive — RandomForest above remains the
+# model used everywhere else: the live active-learning loop in app.py, the
+# feature-importance chart, and taste-summary generation. RF was chosen there
+# for its non-linear splits and the feature_importances_-based interpretability
+# story; logistic regression is included here purely as a linear-model
+# sanity-check baseline, not a replacement. ---------------------------------
+
+def train_logistic_regression(X: np.ndarray, y: np.ndarray) -> LogisticRegression:
+    """Same signature/pattern as train_model() above, for a RandomForest.
+    max_iter raised from sklearn's default of 100, which often fails to
+    converge on a feature set this small; random_state matches the RF's for
+    a like-for-like comparison."""
+    model = LogisticRegression(max_iter=1000, random_state=42)
+    model.fit(X, y)
+    return model
+
+
+def k_fold_accuracy_for_model(model_factory, X: np.ndarray, y: np.ndarray, max_splits: int = 5):
+    """Model-agnostic twin of app.py's k_fold_accuracy, which is hardcoded to
+    RandomForestClassifier internally (intentionally left untouched there,
+    since it's used live by the active-learning loop). model_factory is a
+    zero-arg callable returning a fresh unfitted estimator.
+
+    Uses the identical StratifiedKFold(shuffle=True, random_state=42)
+    construction as app.py's k_fold_accuracy — given the same X/y, that
+    produces the exact same fold assignments, so calling this with
+    LogisticRegression and calling app.py's k_fold_accuracy with the same X/y
+    are scored on identical splits, not just compared as independent numbers.
+    """
+    classes, class_counts = np.unique(y, return_counts=True)
+    if len(classes) < 2:
+        return None
+    n_splits = min(max_splits, int(class_counts.min()))
+    if n_splits < 2:
+        return None
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    scores = cross_val_score(model_factory(), X, y, cv=skf)
+    return float(scores.mean())
+
+
+def evaluate_logistic_regression(labels_df: pd.DataFrame, fills: dict):
+    """Train + k-fold-score a LogisticRegression on the exact same feature
+    prep as evaluate_final_model, so the two models are compared on identical
+    data. Returns (model, accuracy) — does not print; see print_model_comparison."""
+    feats = prepare_features(labels_df, fills)
+    X = feats.values
+    y = labels_df["label"].astype(int).values
+
+    model = train_logistic_regression(X, y)
+    accuracy = k_fold_accuracy_for_model(
+        lambda: LogisticRegression(max_iter=1000, random_state=42), X, y
+    )
+    return model, accuracy
+
+
+def print_model_comparison(rf_accuracy, logreg_accuracy, baseline: float):
+    print("=" * 60)
+    print("MODEL COMPARISON")
+    print("=" * 60)
+    print(f"  Majority-class baseline:  {baseline:.1%}")
+
+    if rf_accuracy is None or logreg_accuracy is None:
+        print("  WARNING: not enough examples per class for k-fold CV — skipping model comparison.")
+        print("=" * 60)
+        print()
+        return
+
+    logreg_lift = (logreg_accuracy - baseline) * 100
+    rf_lift = (rf_accuracy - baseline) * 100
+    logreg_sign = "+" if logreg_lift >= 0 else ""
+    rf_sign = "+" if rf_lift >= 0 else ""
+
+    print(f"  Logistic Regression:      {logreg_accuracy:.1%}   ({logreg_sign}{logreg_lift:.1f}pts vs baseline)")
+    print(f"  Random Forest:            {rf_accuracy:.1%}   ({rf_sign}{rf_lift:.1f}pts vs baseline)")
+    print()
+
+    diff_pts = (rf_accuracy - logreg_accuracy) * 100
+    if abs(diff_pts) < 0.05:
+        print("  Winner: tie")
+    elif diff_pts > 0:
+        print(f"  Winner: RandomForest by {diff_pts:.1f}pts")
+    else:
+        print(f"  Winner: LogisticRegression by {abs(diff_pts):.1f}pts")
+    print("=" * 60)
+    print()
+
+
+def print_logistic_regression_coefficients(model: LogisticRegression, feature_names: list):
+    """Unlike RF's feature_importances_ (magnitude-only, always positive),
+    logistic regression coefficients are directly interpretable: sign shows
+    direction. Positive pushes toward Keep (label=1), negative toward Remove.
+    Note: features aren't standardized before fitting (matching train_model()'s
+    simplicity), so raw coefficient MAGNITUDE isn't directly comparable across
+    features on very different scales (e.g. release_year vs playlist_count) —
+    direction is still valid regardless."""
+    coefs = model.coef_[0]
+    order = np.argsort(np.abs(coefs))[::-1]
+
+    print("=" * 60)
+    print("LOGISTIC REGRESSION COEFFICIENTS (not RandomForest)")
+    print("=" * 60)
+    for i in order:
+        if coefs[i] > 0:
+            direction = "-> pushes toward Keep"
+        elif coefs[i] < 0:
+            direction = "-> pushes toward Remove"
+        else:
+            direction = "-> no effect"
+        print(f"  {feature_names[i]:<20s} {coefs[i]:+.4f}  {direction}")
+    print("  (magnitude not directly comparable across features — different scales; sign is what matters)")
+    print()
+
+
+def plot_model_comparison(baseline: float, logreg_accuracy, rf_accuracy):
+    """Optional bar chart: baseline vs logreg vs RF accuracy. Skips gracefully
+    if either model's k-fold CV wasn't possible."""
+    if logreg_accuracy is None or rf_accuracy is None:
+        print("Skipping model comparison chart — not enough data for k-fold CV on one or both models.")
+        return
+
+    labels = ["Baseline", "Logistic\nRegression", "Random\nForest"]
+    values = [baseline * 100, logreg_accuracy * 100, rf_accuracy * 100]
+    colors = ["#777777", "#F5A623", "#1DB954"]
+
+    plt.figure(figsize=(6, 5))
+    plt.bar(labels, values, color=colors)
+    plt.ylabel("Accuracy (%)")
+    plt.ylim(0, 100)
+    plt.title("Model Comparison: Baseline vs. Logistic Regression vs. Random Forest")
+    plt.tight_layout()
+    plt.savefig(MODEL_COMPARISON_CHART_PATH, dpi=150)
+    plt.close()
+    print(f"Saved model comparison chart to {MODEL_COMPARISON_CHART_PATH}")
 
 
 def simulate_random_curve(labels_df: pd.DataFrame, fills: dict, n_trials: int = RANDOM_TRIALS):
@@ -381,6 +519,11 @@ def main():
 
     model, accuracy, baseline = evaluate_final_model(labels_df, fills)
 
+    logreg_model, logreg_accuracy = evaluate_logistic_regression(labels_df, fills)
+    print_model_comparison(accuracy, logreg_accuracy, baseline)
+    plot_model_comparison(baseline, logreg_accuracy, accuracy)
+    print()
+
     print(f"Simulating random-sampling baseline over {RANDOM_TRIALS} shuffles...")
     random_steps, random_acc = simulate_random_curve(labels_df, fills)
 
@@ -399,6 +542,9 @@ def main():
 
     sorted_names, sorted_importances = plot_feature_importance(model, FEATURE_COLUMNS)
     print(f"Saved feature importance chart to {FEATURE_IMPORTANCE_CHART_PATH}")
+
+    print()
+    print_logistic_regression_coefficients(logreg_model, FEATURE_COLUMNS)
 
     print()
     print("=" * 60)
