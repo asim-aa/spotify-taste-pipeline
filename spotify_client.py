@@ -387,6 +387,71 @@ def unsave_track(sp: spotipy.Spotify, track_id: str) -> bool:
         return False
 
 
+def unsave_album(sp: spotipy.Spotify, album_id: str) -> bool:
+    """Remove an album from the user's saved albums (requires user-library-modify).
+
+    Never raises — returns True on success, False (with a printed warning) on
+    failure, same never-crash pattern as unsave_track.
+    """
+    try:
+        _call_with_retry(sp.current_user_saved_albums_delete, [album_id])
+        return True
+    except SpotifyException as e:
+        if e.http_status == 403:
+            print(
+                f"WARNING: failed to unsave album {album_id} (403 Forbidden). "
+                "This usually means the app's OAuth token doesn't have the "
+                "user-library-modify scope yet — delete .spotify_token_cache and "
+                "restart to re-authorize with the new permission."
+            )
+        else:
+            print(f"WARNING: failed to unsave album {album_id}: {e}")
+        return False
+
+
+def find_or_create_playlist(sp: spotipy.Spotify, name: str, public: bool = False) -> str:
+    """Return the ID of a playlist named exactly `name` owned by the current
+    user, creating one (requires playlist-modify-private/public) if none
+    exists yet. Only matches playlists this user owns, since we're about to
+    add tracks to whatever's returned."""
+    current_user_id = _call_with_retry(sp.current_user).get("id")
+
+    offset = 0
+    while True:
+        results = _call_with_retry(sp.current_user_playlists, limit=PLAYLISTS_PAGE_SIZE, offset=offset)
+        batch = results.get("items", [])
+        if not batch:
+            break
+        for pl in batch:
+            if pl.get("name") == name and (pl.get("owner") or {}).get("id") == current_user_id:
+                return pl["id"]
+        if len(batch) < PLAYLISTS_PAGE_SIZE:
+            break
+        offset += PLAYLISTS_PAGE_SIZE
+
+    print(f"Creating playlist '{name}'...")
+    playlist = _call_with_retry(sp.user_playlist_create, current_user_id, name, public=public)
+    return playlist["id"]
+
+
+def add_tracks_to_playlist(sp: spotipy.Spotify, playlist_id: str, track_ids: list) -> bool:
+    """Add tracks to a playlist, batching 100 at a time (Spotify's per-call cap).
+
+    Never raises — returns True if every batch succeeded, False (with a
+    printed warning) on the first failed batch, same never-crash pattern as
+    elsewhere. Does not de-duplicate against the playlist's existing contents
+    — callers that need idempotent re-runs should filter track_ids first.
+    """
+    for i in range(0, len(track_ids), PLAYLIST_ITEMS_PAGE_SIZE):
+        batch = track_ids[i : i + PLAYLIST_ITEMS_PAGE_SIZE]
+        try:
+            _call_with_retry(sp.playlist_add_items, playlist_id, batch)
+        except SpotifyException as e:
+            print(f"WARNING: failed to add tracks to playlist {playlist_id}: {e}")
+            return False
+    return True
+
+
 def fetch_top_tracks(sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 20) -> list:
     """Fetch the user's top tracks for a given time range (short_term ~4 weeks,
     medium_term ~6 months, long_term ~years). Single page (limit<=50, no

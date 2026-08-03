@@ -41,12 +41,16 @@ import spotipy
 from features import build_dataframe
 from spotify_client import (
     DATA_DIR,
+    _fetch_playlist_track_ids,
+    add_tracks_to_playlist,
     build_auth_manager,
     fetch_playlists_with_tracks,
     fetch_recently_played,
     fetch_saved_albums,
     fetch_saved_tracks,
+    find_or_create_playlist,
     remove_track_from_playlist,
+    unsave_album,
     unsave_track,
 )
 
@@ -71,6 +75,7 @@ OWNER_SPOTIFY_ID = os.getenv("OWNER_SPOTIFY_ID", "")
 
 BOOTSTRAP_SIZE = 20
 GALLERY_COLUMNS_PER_ROW = 4
+CONSOLIDATE_PLAYLIST_NAME = "Loose Album Tracks"
 
 NUMERIC_SOURCE_COLUMNS = [
     "release_year",
@@ -252,6 +257,46 @@ def build_gallery_items(sp, use_disk_cache: bool) -> list:
     return items
 
 
+def consolidate_small_albums(sp, gallery_items: list, tracks_df: pd.DataFrame, threshold: int, also_unsave: bool):
+    """Pull tracks from saved albums with track_count <= threshold into one
+    playlist (reused by name if it already exists). Only tracks that are also
+    in tracks_df (actually saved) are collected, and tracks already present in
+    the target playlist are skipped — so re-running this after adding a new
+    small album doesn't re-add or duplicate anything already there.
+
+    Returns (num_tracks_added, num_albums_matched, unsaved_album_ids).
+    """
+    album_items = [
+        item for item in gallery_items if item["type"] == "album" and item["track_count"] <= threshold
+    ]
+    if not album_items:
+        return 0, 0, []
+
+    valid_ids = set(tracks_df["track_id"])
+    seen = set()
+    collected = []
+    for item in album_items:
+        for tid in item["track_ids"]:
+            if tid in valid_ids and tid not in seen:
+                seen.add(tid)
+                collected.append(tid)
+
+    playlist_id = find_or_create_playlist(sp, CONSOLIDATE_PLAYLIST_NAME, public=False)
+    existing_ids = set(_fetch_playlist_track_ids(sp, playlist_id))
+    to_add = [tid for tid in collected if tid not in existing_ids]
+
+    if to_add:
+        add_tracks_to_playlist(sp, playlist_id, to_add)
+
+    unsaved_album_ids = []
+    if also_unsave:
+        for item in album_items:
+            if unsave_album(sp, item["id"]):
+                unsaved_album_ids.append(item["id"])
+
+    return len(to_add), len(album_items), unsaved_album_ids
+
+
 def render_gallery():
     render_user_badge()
     st.title("What do you want to swipe through?")
@@ -263,6 +308,33 @@ def render_gallery():
             )
 
     tracks_df = st.session_state.tracks_df
+
+    with st.expander("Consolidate small albums"):
+        threshold = st.number_input(
+            "Max tracks per album to consolidate", min_value=1, value=2, step=1, key="consolidate_threshold"
+        )
+        also_unsave = st.checkbox(
+            "Also unsave these albums after consolidating", value=False, key="consolidate_also_unsave"
+        )
+        if st.button("Consolidate small albums"):
+            with st.spinner("Consolidating..."):
+                num_added, num_albums, unsaved_ids = consolidate_small_albums(
+                    st.session_state.sp, st.session_state.gallery_items, tracks_df, threshold, also_unsave
+                )
+            if num_albums == 0:
+                st.info(f"No saved albums found with {threshold} or fewer tracks.")
+            else:
+                st.success(
+                    f"Added {num_added} tracks from {num_albums} albums to '{CONSOLIDATE_PLAYLIST_NAME}'."
+                )
+                if unsaved_ids:
+                    st.session_state.gallery_items = [
+                        item
+                        for item in st.session_state.gallery_items
+                        if not (item["type"] == "album" and item["id"] in unsaved_ids)
+                    ]
+                    st.rerun()
+
     liked_item = {
         "type": "liked",
         "id": None,
@@ -287,6 +359,23 @@ def render_gallery():
                     st.session_state.selected_collection = item
                     st.session_state.current_track_id = None
                     st.rerun()
+
+                if item["type"] == "album":
+                    if st.button("Unsave album", key=f"unsave_album_{item['id']}"):
+                        if unsave_album(st.session_state.sp, item["id"]):
+                            st.toast(f"Unsaved '{item['name']}'", icon="✅")
+                            st.session_state.gallery_items = [
+                                g
+                                for g in st.session_state.gallery_items
+                                if not (g["type"] == "album" and g["id"] == item["id"])
+                            ]
+                            st.rerun()
+                        else:
+                            st.warning(f"Couldn't unsave '{item['name']}' from your saved albums.")
+                    st.caption(
+                        "This unsaves the album — tracks you've separately liked from it "
+                        "will stay in your Liked Songs unless you remove them too."
+                    )
 
 
 # --- Swipe session (Screen 2) ----------------------------------------------
