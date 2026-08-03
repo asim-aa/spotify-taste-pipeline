@@ -6,6 +6,7 @@
 data/*.json
 data/*.csv
 data/*.png
+data/*.md
 !data/.gitkeep
 
 # python

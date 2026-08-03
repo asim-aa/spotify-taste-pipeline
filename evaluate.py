@@ -26,8 +26,55 @@ LABELS_CSV_PATH = DATA_DIR / "labels.csv"
 LEARNING_CURVE_CSV_PATH = DATA_DIR / "learning_curve.csv"
 COMPARISON_CHART_PATH = DATA_DIR / "labels_vs_accuracy.png"
 FEATURE_IMPORTANCE_CHART_PATH = DATA_DIR / "feature_importance.png"
+TASTE_SUMMARY_PATH = DATA_DIR / "taste_summary.md"
 
 RANDOM_TRIALS = 20
+MIN_LABELS_FOR_CONFIDENCE = 100
+
+# Features whose raw distributions are prone to outliers/skew — compare medians
+# instead of means for these so a couple of extreme tracks don't dominate.
+OUTLIER_PRONE_FEATURES = {"days_since_added", "release_year"}
+
+FEATURE_DESCRIPTIONS = {
+    "days_since_added": "how recently you added the track",
+    "artist_track_count": "how many other saved tracks you have from the same artist",
+    "release_year": "how old the track is",
+    "playlist_count": "how many of your playlists include the track",
+    "play_recency_days": "how recently you've actually played it",
+    "popularity": "Spotify's popularity score",
+}
+
+# Natural-language phrase for "kept tracks skew lower/higher on this feature."
+FEATURE_DIRECTION_PHRASES = {
+    "days_since_added": {
+        "lower": "tracks you added more recently",
+        "higher": "tracks you added a while ago",
+    },
+    "artist_track_count": {
+        "lower": "tracks by artists you've saved comparatively few tracks from",
+        "higher": "tracks by artists you've saved a lot of tracks from",
+    },
+    "release_year": {
+        "lower": "older tracks",
+        "higher": "newer tracks",
+    },
+    "playlist_count": {
+        "lower": "tracks that aren't in many of your playlists",
+        "higher": "tracks that show up in more of your playlists",
+    },
+    "play_recency_days": {
+        "lower": "tracks you've played more recently",
+        "higher": "tracks you haven't played in a while",
+    },
+}
+
+FEATURE_VALUE_FORMAT = {
+    "days_since_added": lambda v: f"{v:.0f} days ago",
+    "artist_track_count": lambda v: f"{v:.1f} tracks",
+    "release_year": lambda v: f"{v:.0f}",
+    "playlist_count": lambda v: f"{v:.1f} playlists",
+    "play_recency_days": lambda v: f"{v:.0f} days ago",
+}
 
 
 def load_labels_and_fills() -> tuple[pd.DataFrame, dict]:
@@ -143,7 +190,84 @@ def plot_feature_importance(model, feature_names: list):
     plt.savefig(FEATURE_IMPORTANCE_CHART_PATH, dpi=150)
     plt.close()
 
-    return sorted_names
+    return sorted_names, sorted_importances
+
+
+def _feature_group_stat(values: pd.Series, feature: str) -> tuple[float, str]:
+    """Median for outlier-prone features, mean otherwise. Returns (value, method_name)."""
+    if feature in OUTLIER_PRONE_FEATURES:
+        return float(values.median()), "median"
+    return float(values.mean()), "average"
+
+
+def generate_taste_summary(labels_df: pd.DataFrame, sorted_names: list, sorted_importances: list):
+    """Turn the top (nonzero-importance) features into plain-English sentences about
+    which direction of each feature correlates with Keep vs. Remove, using the
+    labels actually collected. Prints the section and saves it to TASTE_SUMMARY_PATH."""
+    keep_df = labels_df[labels_df["label"] == 1]
+    remove_df = labels_df[labels_df["label"] == 0]
+
+    top_features = [
+        (name, imp)
+        for name, imp in zip(sorted_names, sorted_importances)
+        if imp > 0 and name in FEATURE_DIRECTION_PHRASES
+    ][:3]
+
+    sentences = []
+    for feature, _ in top_features:
+        keep_vals = pd.to_numeric(keep_df[feature], errors="coerce").dropna()
+        remove_vals = pd.to_numeric(remove_df[feature], errors="coerce").dropna()
+        if keep_vals.empty or remove_vals.empty:
+            continue
+
+        keep_stat, method = _feature_group_stat(keep_vals, feature)
+        remove_stat, _ = _feature_group_stat(remove_vals, feature)
+        fmt = FEATURE_VALUE_FORMAT.get(feature, lambda v: f"{v:.1f}")
+        article = "an" if method[0] in "aeiou" else "a"
+
+        if np.isclose(keep_stat, remove_stat):
+            sentence = (
+                f"{FEATURE_DESCRIPTIONS[feature].capitalize()} showed no clear difference "
+                f"between kept and removed tracks ({fmt(keep_stat)} vs {fmt(remove_stat)})."
+            )
+        else:
+            direction = "lower" if keep_stat < remove_stat else "higher"
+            phrase = FEATURE_DIRECTION_PHRASES[feature][direction]
+            sentence = (
+                f"You tend to keep {phrase}, based on {article} {method} of {fmt(keep_stat)} for "
+                f"kept tracks vs {fmt(remove_stat)} for removed ones."
+            )
+        sentences.append(sentence)
+
+    print()
+    print("=" * 60)
+    print("WHAT THE MODEL LEARNED ABOUT YOUR TASTE")
+    print("=" * 60)
+
+    md_lines = ["# What the Model Learned About Your Taste", ""]
+
+    if not sentences:
+        msg = "Not enough signal yet to describe a taste pattern — keep swiping."
+        print(msg)
+        md_lines.append(msg)
+    else:
+        for sentence in sentences:
+            print(f"- {sentence}")
+            md_lines.append(f"- {sentence}")
+
+    if len(labels_df) < MIN_LABELS_FOR_CONFIDENCE:
+        caveat = (
+            f"Based on only {len(labels_df)} labels — treat these as early signals, not "
+            "settled conclusions. Confidence will improve with more labeling."
+        )
+        print()
+        print(caveat)
+        md_lines.append("")
+        md_lines.append(f"*{caveat}*")
+
+    TASTE_SUMMARY_PATH.write_text("\n".join(md_lines) + "\n")
+    print()
+    print(f"Saved taste summary to {TASTE_SUMMARY_PATH}")
 
 
 def main():
@@ -173,7 +297,7 @@ def main():
         print("WARNING: not enough k-fold-eligible points on one or both curves — skipping comparison chart.")
     print()
 
-    sorted_names = plot_feature_importance(model, FEATURE_COLUMNS)
+    sorted_names, sorted_importances = plot_feature_importance(model, FEATURE_COLUMNS)
     print(f"Saved feature importance chart to {FEATURE_IMPORTANCE_CHART_PATH}")
 
     print()
@@ -191,6 +315,8 @@ def main():
         print("  Model accuracy: N/A (too few labels for k-fold CV)")
     print(f"  Top 3 features: {', '.join(sorted_names[:3])}")
     print("=" * 60)
+
+    generate_taste_summary(labels_df, sorted_names, sorted_importances)
 
 
 if __name__ == "__main__":
