@@ -90,6 +90,163 @@ NUMERIC_SOURCE_COLUMNS = [
 FEATURE_COLUMNS = NUMERIC_SOURCE_COLUMNS
 
 
+# --- Styling (pure CSS/layout — no state or behavior changes) --------------
+
+def inject_custom_css():
+    """One-time CSS injection for a modern look on top of Streamlit's default
+    widgets. Purely presentational — every selector here targets Streamlit's
+    own documented data-testid attributes or the official st-key-<key> class
+    (from a widget's key= argument), never internal/unstable class names."""
+    st.markdown(
+        """
+        <style>
+        html, body, [data-testid="stAppViewContainer"] {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter",
+                Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        [data-testid="stMainBlockContainer"] {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding-top: 2rem;
+        }
+
+        /* Tighter vertical rhythm between elements within a section */
+        [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"] {
+            margin-bottom: 0.3rem;
+        }
+
+        [data-testid="stHeading"] h1 {
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+        [data-testid="stHeading"] h2,
+        [data-testid="stHeading"] h3 {
+            font-weight: 600;
+            letter-spacing: -0.01em;
+        }
+
+        /* Sidebar vs. main content distinction */
+        [data-testid="stSidebar"] {
+            border-right: 1px solid rgba(128, 128, 128, 0.18);
+        }
+
+        /* Buttons: rounded, defined accent, clear hover state */
+        [data-testid="stButton"] button {
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        }
+        [data-testid="stButton"] button:hover {
+            border-color: #1DB954;
+            color: #1DB954;
+            transform: translateY(-1px);
+        }
+
+        /* Keep / Remove buttons on the swipe screen, targeted via their
+           existing key= (key="keep_btn" / key="remove_btn" in app.py) */
+        .st-key-keep_btn button {
+            background-color: #1DB954;
+            color: #ffffff;
+            border: none;
+            font-size: 1.05rem;
+            padding: 0.9rem 1rem;
+        }
+        .st-key-keep_btn button:hover {
+            background-color: #1ed760;
+            color: #ffffff;
+            box-shadow: 0 6px 18px rgba(29, 185, 84, 0.35);
+        }
+        .st-key-remove_btn button {
+            background-color: transparent;
+            color: #E85D4C;
+            border: 1.5px solid #E85D4C;
+            font-size: 1.05rem;
+            padding: 0.9rem 1rem;
+        }
+        .st-key-remove_btn button:hover {
+            background-color: #E85D4C;
+            color: #ffffff;
+            box-shadow: 0 6px 18px rgba(232, 93, 76, 0.3);
+        }
+
+        /* Gallery cards: st.container(border=True, key="gallery_card_...") */
+        [class*="st-key-gallery_card_"] {
+            border-radius: 14px !important;
+            transition: box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        [class*="st-key-gallery_card_"]:hover {
+            box-shadow: 0 10px 26px rgba(0, 0, 0, 0.25);
+            transform: translateY(-3px);
+        }
+        /* Square gallery-card art. Streamlit's own st.image DOM is:
+           div[data-testid="stImage"] (flex row, wraps multiple images)
+             > div[data-testid="stImageContainer"] (flex column, one per image)
+               > img (width set inline by Streamlit's own JS)
+           aspect-ratio on the outer flex row gives it a definite height
+           from its (definite) width. The inner container already stretches
+           to fill that height via ordinary flexbox (align-items: stretch
+           is the default, and Streamlit doesn't override it) — no
+           percentage-height or position:absolute needed. The img itself
+           just needs flex-grow to fill that column's height and
+           object-fit to crop, which are plain flex properties that don't
+           fight Streamlit's own inline width style at all. */
+        [class*="st-key-gallery_card_"] [data-testid="stImage"] {
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            overflow: hidden;
+            border-radius: 10px;
+        }
+        [class*="st-key-gallery_card_"] [data-testid="stImage"] img {
+            flex: 1 1 auto;
+            min-height: 0;
+            min-width: 0;
+            width: 100% !important;
+            max-width: 100% !important;
+            object-fit: cover;
+            display: block;
+        }
+        .gallery-art-placeholder {
+            aspect-ratio: 1 / 1;
+            width: 100%;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.25rem;
+            background: rgba(29, 185, 84, 0.10);
+        }
+
+        /* Swipe screen focal card: st.container(border=True, key="swipe_card") */
+        .st-key-swipe_card {
+            border-radius: 18px !important;
+            padding: 1rem !important;
+            text-align: center;
+        }
+        .st-key-swipe_card [data-testid="stImage"] {
+            display: flex;
+            justify-content: center;
+        }
+        .st-key-swipe_card [data-testid="stImage"] img {
+            border-radius: 12px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Progress bar + metric cards */
+        [data-testid="stProgress"] div div {
+            background-color: #1DB954 !important;
+        }
+        [data-testid="stMetric"] {
+            background: rgba(128, 128, 128, 0.08);
+            border-radius: 10px;
+            padding: 0.6rem 0.9rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # --- Data loading / feature prep (unchanged from before this change) -------
 
 def load_tracks() -> pd.DataFrame:
@@ -214,12 +371,15 @@ def ensure_authenticated():
 
 def render_user_badge():
     with st.sidebar:
-        st.caption(f"Logged in as **{st.session_state.spotify_display_name}**")
+        st.markdown("### 🎧 Spotify Swipe")
+        st.caption("Logged in as")
+        st.markdown(f"**{st.session_state.spotify_display_name}**")
         if not st.session_state.is_owner:
             st.caption(
                 "You're using your own Spotify data — your swipes are just for "
                 "this session and won't be saved after you close this page."
             )
+        st.divider()
 
 
 # --- Gallery (Screen 1) -----------------------------------------------------
@@ -299,6 +459,68 @@ def consolidate_small_albums(sp, gallery_items: list, tracks_df: pd.DataFrame, t
     return len(to_add), len(album_items), unsaved_album_ids
 
 
+GALLERY_BADGE_STYLE = {
+    "liked": ("Liked Songs", "green"),
+    "playlist": ("Playlist", "blue"),
+    "album": ("Album", "orange"),
+}
+
+
+def _render_gallery_select_button(item: dict):
+    """Same session_state writes as before this styling pass — only the
+    surrounding layout changed, not this click behavior."""
+    if st.button("Swipe this →", key=f"select_{item['type']}_{item['id']}", use_container_width=True):
+        st.session_state.selected_collection = item
+        st.session_state.current_track_id = None
+        st.rerun()
+
+
+def _render_unsave_album_button(item: dict):
+    """Same unsave-album behavior as before this styling pass."""
+    if st.button("Unsave album", key=f"unsave_album_{item['id']}", use_container_width=True):
+        if unsave_album(st.session_state.sp, item["id"]):
+            st.toast(f"Unsaved '{item['name']}'", icon="✅")
+            st.session_state.gallery_items = [
+                g
+                for g in st.session_state.gallery_items
+                if not (g["type"] == "album" and g["id"] == item["id"])
+            ]
+            st.rerun()
+        else:
+            st.warning(f"Couldn't unsave '{item['name']}' from your saved albums.")
+    st.caption(
+        "This unsaves the album — tracks you've separately liked from it "
+        "will stay in your Liked Songs unless you remove them too."
+    )
+
+
+def render_gallery_card(item: dict):
+    badge_label, badge_color = GALLERY_BADGE_STYLE[item["type"]]
+    card_key = f"gallery_card_{item['type']}_{item['id'] or 'liked'}"
+    with st.container(border=True, key=card_key):
+        if item["image_url"]:
+            st.image(item["image_url"], use_container_width=True)
+        else:
+            st.markdown('<div class="gallery-art-placeholder">🎵</div>', unsafe_allow_html=True)
+
+        st.markdown(f"**{item['name']}**")
+        st.badge(badge_label, color=badge_color)
+        st.caption(f"{item['track_count']} tracks")
+
+        _render_gallery_select_button(item)
+        if item["type"] == "album":
+            _render_unsave_album_button(item)
+
+
+def render_gallery_grid(items: list):
+    for row_start in range(0, len(items), GALLERY_COLUMNS_PER_ROW):
+        row_items = items[row_start : row_start + GALLERY_COLUMNS_PER_ROW]
+        cols = st.columns(GALLERY_COLUMNS_PER_ROW)
+        for col, item in zip(cols, row_items):
+            with col:
+                render_gallery_card(item)
+
+
 def render_gallery():
     render_user_badge()
     st.title("What do you want to swipe through?")
@@ -310,7 +532,33 @@ def render_gallery():
             )
 
     tracks_df = st.session_state.tracks_df
+    playlists = [i for i in st.session_state.gallery_items if i["type"] == "playlist"]
+    albums = [i for i in st.session_state.gallery_items if i["type"] == "album"]
 
+    liked_item = {
+        "type": "liked",
+        "id": None,
+        "name": "All Liked Songs",
+        "image_url": None,
+        "track_count": len(tracks_df),
+        "track_ids": tracks_df["track_id"].tolist(),
+        "is_owned": True,
+    }
+
+    st.subheader("Featured")
+    liked_col, _spacer = st.columns([1, 3])
+    with liked_col:
+        render_gallery_card(liked_item)
+
+    st.divider()
+    st.subheader("Your Playlists")
+    if playlists:
+        render_gallery_grid(playlists)
+    else:
+        st.caption("No owned playlists found.")
+
+    st.divider()
+    st.subheader("Your Saved Albums")
     with st.expander("Consolidate small albums"):
         threshold = st.number_input(
             "Max tracks per album to consolidate", min_value=1, value=2, step=1, key="consolidate_threshold"
@@ -337,47 +585,10 @@ def render_gallery():
                     ]
                     st.rerun()
 
-    liked_item = {
-        "type": "liked",
-        "id": None,
-        "name": "All Liked Songs",
-        "image_url": None,
-        "track_count": len(tracks_df),
-        "track_ids": tracks_df["track_id"].tolist(),
-        "is_owned": True,
-    }
-    all_items = [liked_item] + st.session_state.gallery_items
-
-    for row_start in range(0, len(all_items), GALLERY_COLUMNS_PER_ROW):
-        row_items = all_items[row_start : row_start + GALLERY_COLUMNS_PER_ROW]
-        cols = st.columns(GALLERY_COLUMNS_PER_ROW)
-        for col, item in zip(cols, row_items):
-            with col:
-                if item["image_url"]:
-                    st.image(item["image_url"], use_container_width=True)
-                else:
-                    st.markdown("🎵")
-                if st.button(f"{item['name']}\n({item['track_count']} tracks)", key=f"select_{item['type']}_{item['id']}"):
-                    st.session_state.selected_collection = item
-                    st.session_state.current_track_id = None
-                    st.rerun()
-
-                if item["type"] == "album":
-                    if st.button("Unsave album", key=f"unsave_album_{item['id']}"):
-                        if unsave_album(st.session_state.sp, item["id"]):
-                            st.toast(f"Unsaved '{item['name']}'", icon="✅")
-                            st.session_state.gallery_items = [
-                                g
-                                for g in st.session_state.gallery_items
-                                if not (g["type"] == "album" and g["id"] == item["id"])
-                            ]
-                            st.rerun()
-                        else:
-                            st.warning(f"Couldn't unsave '{item['name']}' from your saved albums.")
-                    st.caption(
-                        "This unsaves the album — tracks you've separately liked from it "
-                        "will stay in your Liked Songs unless you remove them too."
-                    )
+    if albums:
+        render_gallery_grid(albums)
+    else:
+        st.caption("No saved albums found.")
 
 
 # --- Swipe session (Screen 2) ----------------------------------------------
@@ -446,24 +657,27 @@ def render_swipe_session():
 
     render_user_badge()
     with st.sidebar:
-        st.header("Progress")
+        st.subheader("Progress")
         st.metric("Labels so far", len(labels_df))
         if len(labels_df) < BOOTSTRAP_SIZE:
-            st.caption(f"Bootstrap phase: {len(labels_df)}/{BOOTSTRAP_SIZE} random swipes.")
+            st.progress(
+                len(labels_df) / BOOTSTRAP_SIZE,
+                text=f"Bootstrap phase: {len(labels_df)}/{BOOTSTRAP_SIZE} random swipes",
+            )
         if st.session_state.last_accuracy is not None:
             st.metric("Model accuracy (k-fold)", f"{st.session_state.last_accuracy:.1%}")
         else:
             st.caption("Accuracy appears once k-fold CV is possible (both labels present).")
 
         st.divider()
-        if st.button("← Back to gallery"):
+        st.caption("SESSION")
+        if st.button("← Back to gallery", use_container_width=True):
             st.session_state.selected_collection = None
             st.session_state.current_track_id = None
             st.rerun()
 
         if is_owner:
-            st.divider()
-            if st.button("Sync to GitHub now", key="sync_now_btn"):
+            if st.button("Sync to GitHub now", key="sync_now_btn", use_container_width=True):
                 with st.spinner("Committing labels.csv/learning_curve.csv to GitHub..."):
                     synced = commit_data_files_to_github()
                 if synced:
@@ -476,6 +690,8 @@ def render_swipe_session():
                     )
 
         if collection["type"] == "playlist" and collection.get("is_owned"):
+            st.divider()
+            st.caption("REMOVE BEHAVIOR")
             st.radio(
                 "Remove means:",
                 options=["playlist", "library"],
@@ -509,14 +725,15 @@ def render_swipe_session():
 
     track = collection_tracks_df[collection_tracks_df["track_id"] == current_id].iloc[0]
 
-    if pd.notna(track.get("image_url")):
-        st.image(track["image_url"], width=300)
-    st.subheader(track["track_name"])
-    st.caption(f"{track['artist_name']} — {track.get('album_name', '')}")
+    with st.container(border=True, key="swipe_card"):
+        if pd.notna(track.get("image_url")):
+            st.image(track["image_url"], width=360)
+        st.subheader(track["track_name"])
+        st.caption(f"{track['artist_name']} — {track.get('album_name', '')}")
 
-    col1, col2 = st.columns(2)
-    keep_clicked = col1.button("Keep", key="keep_btn")
-    remove_clicked = col2.button("Remove", key="remove_btn")
+        col1, col2 = st.columns(2)
+        keep_clicked = col1.button("Keep", key="keep_btn", use_container_width=True)
+        remove_clicked = col2.button("Remove", key="remove_btn", use_container_width=True)
 
     if keep_clicked or remove_clicked:
         label = 1 if keep_clicked else 0
@@ -558,7 +775,8 @@ def render_swipe_session():
 
 
 def main():
-    st.set_page_config(page_title="Spotify Swipe", layout="centered")
+    st.set_page_config(page_title="Spotify Swipe", page_icon="🎧", layout="wide")
+    inject_custom_css()
 
     ensure_authenticated()
 
