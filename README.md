@@ -100,6 +100,32 @@ endpoints (`audio-features`, `artists`) that 403 for apps without Extended Quota
 Mode approval, which personal/hobby apps don't get. All signal instead comes from
 track metadata and your own behavior (recently played, playlists, saves).
 
+## Lessons learned
+
+If I started this over, the first thing I'd change is checking API stability
+before designing around a specific endpoint, not after. `audio-features` and
+artist genre lookups were the intended core of the feature set — I built
+toward them, then lost access to both mid-project when Spotify gated them
+behind Extended Quota approval that hobby apps don't get. The playlist
+creation endpoint I depended on for the consolidation feature was retired
+outright a few months later. None of that was foreseeable in exact detail,
+but "is this endpoint likely to still exist and be accessible in three
+months" wasn't a question I asked going in, and it should have been —
+especially for a personal project with no leverage to appeal an API
+restriction if it lands on you.
+
+The second thing is durability. I treated where the data actually lives as a
+deploy-time afterthought — it was fine locally, so I didn't think hard about
+it until Streamlit Cloud's ephemeral filesystem made "fine locally" not good
+enough, and I ended up bolting on a GitHub-backed sync after the fact instead
+of designing storage once, upfront, in a way that worked the same in both
+environments. On the scope side, starting with just the swipe loop and
+nothing else was the right call — the gallery, album consolidation, and
+multi-user auth were all real features, but they showed up because the
+simple version shipped fast enough to reveal what was actually missing.
+Building all of that in first, before a single real swipe happened, would
+have meant guessing at requirements instead of finding them.
+
 <details>
 <summary><strong>Full setup instructions</strong> (Spotify credentials, local dev, deployment)</summary>
 
@@ -257,6 +283,17 @@ itself guarantee your own accumulated labels survive indefinitely on the hosted
 platform. If long-term durability on the hosted deployment matters, that needs
 an external store (e.g. periodically committing back to git, or a small
 database) — not implemented here.
+
+**Update: this is now fixed.** The owner's `data/labels.csv` and
+`data/learning_curve.csv` are periodically committed back to this GitHub repo
+via the Contents API (`github_sync.py`) — automatically every 10 labels
+during a swipe session, plus a manual "Sync to GitHub now" button in the
+sidebar for syncing right before ending a session. Accumulated swipes on the
+deployed instance are durable as long as a sync has run before any restart;
+labels swiped since the last sync (e.g. mid-session, before hitting the 10th
+label) are still momentarily at risk until the next auto-sync or a manual
+click. Testers are unaffected either way, since their data was never written
+to disk in the first place.
 
 ## Deploying to Streamlit Cloud
 
