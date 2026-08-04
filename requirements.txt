@@ -1,4 +1,5 @@
 spotipy
+requests
 pandas
 python-dotenv
 streamlit

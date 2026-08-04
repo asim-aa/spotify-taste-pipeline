@@ -39,6 +39,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score
 
 import spotipy
 from features import build_dataframe
+from github_sync import commit_data_files_to_github
 from spotify_client import (
     DATA_DIR,
     _fetch_playlist_track_ids,
@@ -76,6 +77,7 @@ OWNER_SPOTIFY_ID = os.getenv("OWNER_SPOTIFY_ID", "")
 BOOTSTRAP_SIZE = 20
 GALLERY_COLUMNS_PER_ROW = 4
 CONSOLIDATE_PLAYLIST_NAME = "Loose Album Tracks"
+GITHUB_SYNC_EVERY_N_LABELS = 10
 
 NUMERIC_SOURCE_COLUMNS = [
     "release_year",
@@ -459,6 +461,20 @@ def render_swipe_session():
             st.session_state.current_track_id = None
             st.rerun()
 
+        if is_owner:
+            st.divider()
+            if st.button("Sync to GitHub now", key="sync_now_btn"):
+                with st.spinner("Committing labels.csv/learning_curve.csv to GitHub..."):
+                    synced = commit_data_files_to_github()
+                if synced:
+                    st.session_state.labels_since_github_sync = 0
+                    st.success("Synced to GitHub.")
+                else:
+                    st.warning(
+                        "GitHub sync failed or is unconfigured — see the app's "
+                        "server logs for details. Your local labels are unaffected."
+                    )
+
         if collection["type"] == "playlist" and collection.get("is_owned"):
             st.radio(
                 "Remove means:",
@@ -532,6 +548,11 @@ def render_swipe_session():
             log_row = pd.DataFrame([{"num_labels": len(updated_labels_df), "accuracy": accuracy}])
             append_csv_row(LEARNING_CURVE_CSV_PATH, log_row)
 
+            st.session_state.labels_since_github_sync += 1
+            if st.session_state.labels_since_github_sync >= GITHUB_SYNC_EVERY_N_LABELS:
+                commit_data_files_to_github()
+                st.session_state.labels_since_github_sync = 0
+
         st.session_state.current_track_id = None
         st.rerun()
 
@@ -565,6 +586,7 @@ def main():
         st.session_state.last_accuracy = None
         st.session_state.selected_collection = None
         st.session_state.gallery_items = None
+        st.session_state.labels_since_github_sync = 0
 
     if st.session_state.selected_collection is None:
         render_gallery()
